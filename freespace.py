@@ -3,15 +3,10 @@
 
 from util import fatal_error
 
-# There are two chunks of free space in memory:
-#    0x8009BF60 - 0x80127F60 (0x8C000 bytes)
-#    0x80550000 - 0x805DC000 (0x8C000 bytes)
-#
-# We'll just handle one of them for now.
-
+# We'll just handle one chunk of free space for now.
 sector_0 = {
-    "address": 0x8009BF60,
-    "size": 0x8C000,
+    "address": 0x80530000,
+    "size": 0x20000,
 }
 
 POINTER_TYPE_NORMAL = "normal"
