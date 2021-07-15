@@ -8,41 +8,20 @@ import sys
 
 import tt_config
 import files
+import freespace
+from util import *
 
 
-quiet = False
-
-def print_info(message):
+def setup_dol(input_dir, work_dir):
     """
-    Prints informational content to the console.
+    Extracts the main .dol file into the working directory.
     """
-    if not quiet:
-        print(message)
-
-
-def fatal_error(message):
-    """
-    Exits the program with the given error message.
-    """
-    sys.exit("ERROR: %s" % message)
-
-
-def assert_dir_exists(directory):
-    """
-    Checks if the given directory exists. If it doesn't,
-    then the program is terminated.
-    """
-    if not os.path.isdir(directory):
-        fatal_error("Directory '%s' doesn't exist." % directory)
-
-
-def assert_dirs_exist(*directories):
-    """
-    Checks if the given directories exist. If any doesn't,
-    then the program is terminated.
-    """
-    for directory in directories:
-        assert_dir_exists(directory)
+    original_filepath = files.get_original_filepath(tt_config.dol_file)
+    input_filepath = os.path.join(input_dir, original_filepath)
+    work_filepath = os.path.join(work_dir, tt_config.dol_file)
+    os.makedirs(os.path.dirname(work_filepath), exist_ok=True)
+    shutil.copy(input_filepath, work_filepath)
+    print_info("Setup '%s'" % work_filepath)
 
 
 def setup_ring_attack(input_dir, work_dir):
@@ -50,19 +29,25 @@ def setup_ring_attack(input_dir, work_dir):
     Extracts all the Ring Attack files into the working directory.
     They are transformed into JSON files for easier editing.
     """
-    for toadstool_filepath in tt_config.ring_attack_files:
+    # Read the game .dol file contents.
+    dol_filepath = os.path.join(work_dir, tt_config.dol_file)
+    with open(dol_filepath, mode="rb") as f:
+        dol = f.read()
+
+    for hole in tt_config.ring_attack_holes:
         ring_attack_data = {
             "rings": [],
         }
 
         # Read the rings definition file.
+        toadstool_filepath = hole["file"]
         original_filepath = files.get_original_filepath(toadstool_filepath)
         filepath = os.path.join(input_dir, original_filepath)
         with open(filepath, mode="rb") as f:
             data = f.read()
 
         # Parse the ring data from the file.
-        num_rings = struct.unpack_from(">i", data, 0)[0]
+        num_rings = struct.unpack_from(">I", data, 0)[0]
         for i in range(num_rings):
             offset = (i * 7 * 4) + 4
             ring_attack_data["rings"].append({
@@ -75,6 +60,15 @@ def setup_ring_attack(input_dir, work_dir):
                 "scaleY": struct.unpack_from(">f", data, offset + 0x18)[0],
             })
 
+        # Read the hole's title.
+        # 0x1401CC is the start of the string table. The string table
+        # first lists the offsets of all string ids from the start of
+        # this table. For example, if an entry is the value 0x100, then
+        # the contents of the string lives at 0x1401CC + 0x100.
+        offset = struct.unpack_from(">I", dol, hole["dolTitlePointer"])[0]
+        title_address = 0x1401CC + offset
+        ring_attack_data["title"] = read_c_ascii_string(dol, title_address)
+
         # Write the parsed ring definition file as JSON.
         work_filepath = os.path.join(work_dir, toadstool_filepath)
         os.makedirs(os.path.dirname(work_filepath), exist_ok=True)
@@ -84,13 +78,14 @@ def setup_ring_attack(input_dir, work_dir):
         print_info("Setup '%s'" % work_filepath)
 
 
-def stage_ring_attack(work_dir, stage_dir):
+def stage_ring_attack(work_dir, stage_dir, free_space):
     """
     Converts the Ring Attack files into their original file formats
     and saves them into the staging directory.
     """
-    for toadstool_filepath in tt_config.ring_attack_files:
+    for hole in tt_config.ring_attack_holes:
         # Read the ring attack JSON file.
+        toadstool_filepath = hole["file"]
         work_filepath = os.path.join(work_dir, toadstool_filepath)
         with open(work_filepath) as f:
             ring_attack_data = json.load(f)
@@ -99,7 +94,7 @@ def stage_ring_attack(work_dir, stage_dir):
         num_rings = len(ring_attack_data["rings"])
         file_length = 4 + num_rings * 0x1C
         data = bytearray(file_length)
-        struct.pack_into(">i", data, 0, num_rings)
+        struct.pack_into(">I", data, 0, num_rings)
         for i, ring in enumerate(ring_attack_data["rings"]):
             offset = 4 + i * 0x1C
             struct.pack_into(">fffffff", data, offset,
@@ -118,7 +113,61 @@ def stage_ring_attack(work_dir, stage_dir):
         with open(stage_filepath, "wb") as f:
             f.write(data)
 
+        # Write the data to free space.
+        title_string = to_c_ascii_string(ring_attack_data["title"])
+        freespace.alloc(free_space, title_string, hole["dolTitlePointer"], pointer_type=freespace.POINTER_TYPE_TEXT_TABLE)
+
         print_info("Staged '%s' as '%s'" % (work_filepath, stage_filepath))
+
+
+def stage_dol(work_dir, stage_dir, free_space):
+    """
+    Injects modifications into the game's free space by adding
+    custom Data section(s) into the .dol file.
+    """
+    # We won't get too clever for now, so we'll make some assumptions
+    # about the .dol--namely, that it's a vanilla .dol from MGTT.
+
+    # Read the existing .dol file contents.
+    work_filepath = os.path.join(work_dir, tt_config.dol_file)
+    with open(work_filepath, mode="rb") as f:
+        dol = bytearray(f.read())
+
+    # Append the injected data to the end of the .dol file.
+    # Calculate the total size of the injected data along the way.
+    data_size = 0
+    for alloc in free_space["allocs"]:
+        data_size += len(alloc["data"])
+        dol.extend(alloc["data"])
+
+    # Write the DOL header attributes for the new data section that
+    # we just appended to the file.
+    struct.pack_into(">I", dol, 0x20, 0x15E7C0) # address in .dol
+    struct.pack_into(">I", dol, 0x68, free_space["sector"]["address"]) # in-game memory address
+    struct.pack_into(">I", dol, 0xB0, data_size) # section size
+
+    # Update the pointers in the .dol to the injected data so the game
+    # knows to look for our injected data, rather than the original data.
+    for alloc in free_space["allocs"]:
+        pointer_type = alloc["pointer_type"]
+        if pointer_type == freespace.POINTER_TYPE_TEXT_TABLE:
+            # 0x801431CC is the start of the in-memory string table. The string table
+            # first lists the offsets of all string ids from the start of
+            # this table. For example, if an entry is the value 0x100, then
+            # the contents of the string lives at 0x801431CC + 0x100.
+            text_offset = (alloc["address"]) - 0x801431CC
+            struct.pack_into(">i", dol, alloc["pointer"], text_offset)
+        else:
+            fatal_error("Unhandled free-space pointer type '%s'" % pointer_type)
+
+    # Write the .dol file to the staging directory.
+    original_filepath = files.get_original_filepath(tt_config.dol_file)
+    stage_filepath = os.path.join(stage_dir, original_filepath)
+    os.makedirs(os.path.dirname(stage_filepath), exist_ok=True)
+    with open(stage_filepath, "wb") as f:
+        f.write(dol)
+
+    print_info("Staged '%s' as '%s'" % (work_filepath, stage_filepath))
 
 
 def command_setup(input_dir, work_dir):
@@ -130,6 +179,7 @@ def command_setup(input_dir, work_dir):
     """
     assert_dir_exists(input_dir)
     os.makedirs(work_dir, exist_ok=True)
+    setup_dol(input_dir, work_dir)
     setup_ring_attack(input_dir, work_dir)
     print_info("Setup successfully completed! Wahoo!")
 
@@ -141,7 +191,9 @@ def command_stage(work_dir, stage_dir):
     """
     assert_dir_exists(work_dir)
     os.makedirs(stage_dir, exist_ok=True)
-    stage_ring_attack(work_dir, stage_dir)
+    free_space = freespace.init()
+    stage_ring_attack(work_dir, stage_dir, free_space)
+    stage_dol(work_dir, stage_dir, free_space)
     print_info("Stage successfully completed! Wahoo!")
 
 
@@ -187,11 +239,7 @@ if __name__ == "__main__":
     argparser.add_argument("-i", "--input-dir", help="Directory of the MGTT ISO's extracted filesystem", required=True)
     argparser.add_argument("-w", "--work-dir", help="Working directory of the ToadsTool data files. Defaults to \"%s\"" % default_work_dir, default=default_work_dir)
     argparser.add_argument("-s", "--stage-dir", help="Staging directory of the ToadsTool data files. Defaults to \"%s\"" % default_stage_dir, default=default_stage_dir)
-    argparser.add_argument("-q", "--quiet", help="Don't print any output to the console", action='store_true', default=False)
     args = argparser.parse_args()
-
-    if args.quiet:
-        quiet = True
     
     if args.command == "setup":
         command_setup(args.input_dir, args.work_dir)
