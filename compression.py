@@ -26,7 +26,8 @@ def decompress(data):
     Decompresses the given input bytearray.
     TODO: Add error handling.
     """
-    index = 0
+    # Skip the first 4 header bytes.
+    index = 4
 
     def read_byte():
         nonlocal index
