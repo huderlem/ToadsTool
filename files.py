@@ -46,17 +46,9 @@ def get_toadstool_filepath(original_filepath):
     return from_original[original_filepath]['toadstool_filepath']
 
 
-def get_file_id_from_toadstool_filepath(toadstool_filepath):
+def is_compressed(original_filepath):
     """
-    Gets the file id from the ToadsTool filepath.
-    """
-    from_toadstool, _ = get_maps()
-    return from_toadstool[toadstool_filepath]['file_id']
-
-
-def get_file_id_from_original_filepath(original_filepath):
-    """
-    Gets the file id from the original game's filepath.
+    Gets whether or not the original filepath is compressed.
     """
     _, from_original = get_maps()
-    return from_original[original_filepath]['file_id']
+    return from_original[original_filepath]['compression_type'] != "0"

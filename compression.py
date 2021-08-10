@@ -1,6 +1,6 @@
 # This file contains logic for compressing and decompressing binary
 # game files. Mario Golf: Toadstool Tour uses a simple LZ-style
-# compression method, where data is either copied direclty, or copied
+# compression method where data is either copied directly, or it's copied
 # from a previous position from the decompression buffer.
 #
 # This file's compression and decompression functionality probably needs
@@ -65,7 +65,6 @@ def decompress(data):
                     # Calculate the offset in the decompression buffer, from which we
                     # will copy data.
                     offset = (p0 & 0xF0) * 0x10 + p1
-
                     copy_ctrl = p0 & 0xF
                     if copy_ctrl == 0:
                         # Copy at least 17 bytes
@@ -78,28 +77,29 @@ def decompress(data):
                     for i in range(num_bytes):
                         output.append(output[-offset])
 
+
 # LZ_WINDOW_SIZE can be freely tweaked to control
 # the processing speed, with a compression quality tradeoff.
 # A larger LZ_WINDOW_SIZE will result in better compression, but
 # it will take longer to run.  LZ_WINDOW_SIZE has a maximum of 4096.
 # I've found that LZ_WINDOW_SIZE=512 will result in slightly smaller
 # file sizes than the original game's files.
-LZ_WINDOW_SIZE = 128
+LZ_WINDOW_SIZE = 64
 
 # Don't tweak these values--they are constants baked into the
 # game's decompression code.
 LZ_PREFIX_MIN_LENGTH = 3
 LZ_PREFIX_MAX_LENGTH = 272
 
-def get_longest_prefix(data, cur_index):
+def get_longest_prefix(data, cur_index, window_size):
     """
     Performs an LZ prefix search in a sliding window of the input data.
     """
     data_len = len(data)
     longest_prefix_index = cur_index
     longest_prefix_length = 0
-    start_index = max(0, cur_index - LZ_WINDOW_SIZE)
-    for start_index in range(max(0, cur_index - LZ_WINDOW_SIZE), cur_index):
+    start_index = max(0, cur_index - window_size)
+    for start_index in range(max(0, cur_index - window_size), cur_index):
         if data[start_index] == data[cur_index]:
             prefix_length = 1
             i = start_index + 1
@@ -116,9 +116,17 @@ def get_longest_prefix(data, cur_index):
     return longest_prefix_index, longest_prefix_length
 
 
-def compress(data):
+def compress(data, compress_type=0x1, window_size=LZ_WINDOW_SIZE):
     """
     Compresses the given input bytearray.
+    Args:
+        data: the raw data bytearray to be compressed
+        compress_type: there are two types of compressed files; 0x1 and 0x2
+                       Type 0x1 is a plain compressed file.
+                       Type 0x2 is just like type 0x1, but there is a data table appended to the file.
+                           ToadsTool doesn't support type 0x2 right now, because the data table isn't fully
+                           understood. If you need to modify a type-2 compressed file, simply append the
+                           original datatable to the end of the resulting compressed file.
     """
     data_len = len(data)
     if data_len > 0xFFFFFF:
@@ -128,13 +136,13 @@ def compress(data):
     struct.pack_into(">I", output, 0, data_len)
     # The uncompressed data length is only three bytes large, and we
     # overwrite the first byte in the header with the compression type
-    output[0] = 0x2
+    output[0] = compress_type
 
     # Build up the list of LZ commands for copying immediate or pre-existing data.
     commands = []
     i = 0
     while i < data_len:
-        longest_prefix_index, longest_prefix_length = get_longest_prefix(data, i)
+        longest_prefix_index, longest_prefix_length = get_longest_prefix(data, i, window_size)
         if longest_prefix_length > LZ_PREFIX_MIN_LENGTH:
             # Emit command for copying previous data.
             offset = i - longest_prefix_index
@@ -181,6 +189,4 @@ def compress(data):
         output.append(ctrl)
         output.extend(buff)
 
-    # The original game always has 8 0xFF bytes at the end, for some reason.
-    output.extend([0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF])
     return output
